@@ -1,0 +1,11 @@
+pandas
+json
+os
+time
+python-dotenv
+tqdm
+absl-py
+langchain-google-genai
+pinecone-client
+groq
+langchain
