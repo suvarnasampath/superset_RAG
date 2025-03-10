@@ -1,4 +1,5 @@
 pandas
+vertexai
 json
 os
 time
