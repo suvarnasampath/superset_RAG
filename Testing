@@ -4,30 +4,48 @@ import os
 import time
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from pinecone import Pinecone, ServerlessSpec
-from langchain_groq import ChatGroq
 from langchain.schema import Document
 from dotenv import load_dotenv, find_dotenv
 from tqdm import tqdm
 from absl import logging
+import vertexai
+from vertexai.generative_models import HarmCategory, HarmBlockThreshold
+from vertexai.preview.generative_models import GenerativeModel
 
 logging.set_verbosity(logging.ERROR)
 
 # Load environment variables
 load_dotenv(find_dotenv())
 
-
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-if not all([GOOGLE_API_KEY, PINECONE_API_KEY, GROQ_API_KEY]):
+if not all([GOOGLE_API_KEY, PINECONE_API_KEY]):
     exit("Missing required API keys.")
+
+# Initialize Vertex AI
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "email-extraction-381718-3f73208ce3b71.json"
+vertexai.init(project="email-extraction-381718", location="us-central1")
+
+generative_multimodal_model = GenerativeModel("gemini-1.5-pro-001")
+
+generation_config = {
+    "max_output_tokens": 8192,
+    "temperature": 0.4,
+    "top_p": 0.5,
+}
+
+safety_settings = {
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+}
 
 base_dir = "C:/Users/SuvarnaSampath/PycharmProjects/Superset"
 base_folder = os.path.join(base_dir, "Base")
 data_folder = os.path.join(base_dir, "Data")
 os.makedirs(data_folder, exist_ok=True)
-
 
 txt_files = [f for f in os.listdir(base_folder) if f.endswith(".txt")]
 
@@ -57,6 +75,7 @@ def json_to_dataframe(file_path):
     except Exception as e:
         exit(f"Unexpected error: {e}")
 
+
 df = json_to_dataframe(txt_file_path)
 df.to_csv(csv_file_path, index=False)
 print(f"Converted and saved CSV at: {csv_file_path}")
@@ -70,13 +89,12 @@ def group_rows_into_chunks(df, rows_per_chunk=40):
         text_chunks.append(Document(page_content=chunk_text))
     return text_chunks
 
+
 # Load CSV
 df = pd.read_csv(csv_file_path)
 chunks = group_rows_into_chunks(df, rows_per_chunk=40)
 
-
 embedding_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-
 
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index_name = "rag-index"
@@ -90,13 +108,11 @@ if index_name not in pc.list_indexes().names():
     )
     time.sleep(10)
 
-
 try:
     index = pc.Index(index_name)
     index_stats = index.describe_index_stats()
 except Exception as e:
     exit(f"Error: Failed to connect to Pinecone index - {e}")
-
 
 if index_stats["total_vector_count"] == 0:
     vectors = []
@@ -110,11 +126,8 @@ else:
     print("Embeddings already exist in Pinecone. Skipping upload.")
 
 
-chat_model = ChatGroq(model_name="llama-3.1-8b-instant", api_key=GROQ_API_KEY)
-
 def retrieve_and_generate_response(user_query, top_k=3):
     query_embedding = embedding_model.embed_query(user_query)
-
     search_results = index.query(vector=query_embedding, top_k=top_k, include_metadata=True)
 
     if not search_results["matches"]:
@@ -123,11 +136,18 @@ def retrieve_and_generate_response(user_query, top_k=3):
     retrieved_texts = [match["metadata"]["text"] for match in search_results["matches"]]
     retrieved_text = "\n".join(retrieved_texts)
 
-    response = chat_model.invoke(
-        f"Here is inventory data retrieved for the query:\n\n{retrieved_text}\n\nAnswer the query based only on this data: {user_query}"
-    )
+    def generate_response(retrieved_text, user_query):
+        prompt = (
+            "You are an AI assistant analyzing data. Below is the retrieved data relevant to the query. "
+            "Answer the user's question based only on this data. Provide a structured, concise, and informative response.\n\n"
+            f"Retrieved Data:\n{retrieved_text}\n\n"
+            f"User Query: {user_query}")
+        response = generative_multimodal_model.generate_content(prompt, generation_config=generation_config,
+                                                                safety_settings=safety_settings)
+        return response.text
 
-    return response.content
+    return generate_response(retrieved_text, user_query)
+
 
 try:
     while True:
