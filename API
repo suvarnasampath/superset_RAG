@@ -1,0 +1,53 @@
+from RAG import (
+    convert_json_to_csv,
+    group_rows_into_chunks,
+    upload_embeddings_to_pinecone,
+    query_and_generate_response,
+    cleanup_files_and_index
+)
+import pandas as pd
+import os
+
+base_dir = os.getcwd() + '/superset/AI/'
+upload_folder = os.path.join(base_dir, "uploads")
+data_folder = os.path.join(base_dir, "Data")
+os.makedirs(upload_folder, exist_ok=True)
+os.makedirs(data_folder, exist_ok=True)
+
+class ChartApi(BaseSupersetApi):
+    # All your existing endpoints (hello, chartAnalyze, downloadExcel) remain the same
+
+    @expose('/full_process', methods=("POST",))
+    def full_process(self):
+
+        file = request.files['file']
+        user_query = request.form.get('query', '').strip()
+
+        if not user_query:
+            return self.response(400, message="Query is required.")
+
+        file_path = os.path.join(upload_folder, file.filename)
+        file.save(file_path)
+
+        try:
+            # Convert to CSV
+            csv_path = convert_json_to_csv(file_path, data_folder)
+
+            # split into chunks
+            df = pd.read_csv(csv_path)
+            chunks = group_rows_into_chunks(df)
+
+            # chunks to Pinecone
+            upload_embeddings_to_pinecone(chunks)
+
+            # Query
+            response = query_and_generate_response(user_query)
+
+        except Exception as e:
+            return self.response(500, message=f"Error during processing: {e}")
+
+        finally:
+            # cleanup
+            cleanup_files_and_index(file_path, csv_path)
+
+        return self.response(200, message=response)
